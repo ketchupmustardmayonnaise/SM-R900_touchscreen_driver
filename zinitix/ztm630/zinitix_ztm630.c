@@ -143,6 +143,30 @@ static void get_wheel(void *device_data);
 #endif
 #endif
 
+// modified
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/string.h>
+
+#define NODE_NUM 209
+#define VALID_NODE_NUM 64
+#define MAX_DATA_STR_BUF VALID_NODE_NUM * 5
+#define REFRESH_RATE 5 
+
+static bool g_bSafe2GetRawData = false;
+static struct workqueue_struct *g_workqueue = NULL;
+static struct delayed_work *g_work = NULL;
+struct ztm620_info *globInfo = NULL;
+
+static const struct file_operations proc_fops = {
+	.owner = THIS_MODULE,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 #ifdef CONFIG_SLEEP_MONITOR
 static int ztm620_get_sleep_monitor_cb(void* priv, unsigned int *raw_val, int check_level, int caller_type);
 static struct sleep_monitor_ops  ztm620_sleep_monitor_ops = {
@@ -615,9 +639,10 @@ static void ztm620_get_dqa_data(struct ztm620_info *info)
 	}
 }
 
-#ifdef ZINITIX_FILE_DEBUG
+// modified
+//#ifdef ZINITIX_FILE_DEBUG
 /* zinitix_rawdata_store */
-#define ZINITIX_DEFAULT_UMS    "/home/owner/media/zinitix_rawdata.txt"
+#define ZINITIX_DEFAULT_UMS    "/proc/amplitude_log"
 #define FILE_BUFF_SIZE	1500	// more than [(x_num * y_num + 32)*6 + 1]
 static void ztm620_store_raw_data(struct ztm620_info *info)
 {
@@ -676,7 +701,32 @@ static void ztm620_store_raw_data(struct ztm620_info *info)
 
 	return;
 }
-#endif
+
+//modified
+static void proc_get_raw_data(struct work_struct *workstruct)
+{
+	if (!g_bSafe2GetRawData)
+	{
+		queue_delayed_work(g_workqueue, g_work, msecs_to_jiffies(REFRESH_RATE));
+		return;
+	}
+
+	if (g_ztm620_info != NULL)
+	{
+		ztm620_store_raw_data(g_ztm620_info);
+		queue_delayed_work(g_workqueue, g_work, msecs_to_jiffies(REFRESH_RATE));
+	}
+	else if (globInfo != NULL)
+	{
+		ztm620_store_raw_data(globInfo);
+		queue_delayed_work(g_workqueue, g_work, msecs_to_jiffies(REFRESH_RATE));
+	}
+	else
+	{
+		queue_delayed_work(g_workqueue, g_work, msecs_to_jiffies(REFRESH_RATE));
+	}
+}
+//#endif
 
 static bool ztm620_get_raw_data(struct ztm620_info *info)
 {
@@ -2822,6 +2872,10 @@ static int ztm620_input_open(struct input_dev *dev)
 	enable_irq_wake(info->irq);
 
 	up(&info->work_lock);
+
+	// modified
+	globInfo = input_get_drvdata(dev);
+	g_bSafe2GetRawData = true;
 
 	dev_info(&client->dev, "%s---\n", __func__);
 
@@ -7870,12 +7924,26 @@ static int __init ztm620_init(void)
 		pr_err("%s:device init failed.[%d]\n", __func__, ret);
 	}
 
+	// modified
+	proc_create("amplitude_log", 0, NULL, &proc_fops);
+	g_workqueue = create_singlethread_workqueue("proc_get_raw_data");
+	if(g_workqueue != NULL)
+	{
+		INIT_DELAYED_WORK(g_work, proc_get_raw_data);
+		queue_delayed_work(g_workqueue, g_work, msecs_to_jiffies(REFRESH_RATE));
+	}
+
 	return ret;
 }
 
 static void __exit ztm620_exit(void)
 {
 	i2c_del_driver(&ztm620_ts_driver);
+
+	// modified
+	cancel_delayed_work(g_work);
+	flush_workqueue(g_workqueue);
+	destroy_workqueue(g_workqueue);
 }
 
 module_init(ztm620_init);
